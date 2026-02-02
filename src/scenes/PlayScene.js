@@ -110,6 +110,7 @@ export class PlayScene extends Phaser.Scene {
         this.socket.on('game_start', (data) => {
             this.isWaiting = false;
             this.playerRole = data.role; // 'p1' o 'p2'
+            this.opponentName = data.opponentName;
             this.players = {
                 human: data.yourState,
                 opponent: {
@@ -216,7 +217,7 @@ export class PlayScene extends Phaser.Scene {
         const centerX = width / 2;
 
         // Nombre Oponente
-        this.add.text(centerX, 20, "IA-Master26", {
+        this.add.text(centerX, 20, this.opponentName || "Esperando...", {
             fontSize: '18px', color: '#ff0055', fontStyle: 'bold'
         }).setOrigin(0.5, 0);
 
