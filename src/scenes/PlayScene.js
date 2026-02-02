@@ -16,7 +16,10 @@ export class PlayScene extends Phaser.Scene {
         this.playerName = 'Jugador 1';
         this.socket = null;
         this.isWaiting = true;
-        this.turn = 'p1'; // Manejado por servidor
+        this.currentTurn = 'p1'; // Corregir tipo inicial
+        this.playerNameText = null;
+        this.opponentNameText = null;
+        this.turnTweens = [];
     }
 
     init(data) {
@@ -63,27 +66,37 @@ export class PlayScene extends Phaser.Scene {
         this.renderBoard();
         this.setupDragLogic();
 
-        // Botón de Sesión - CAMBIO ESPECÍFICO 3
-        const editBtn = this.add.text(width - 50, height - 30, '✎ Editar Nombre', {
-            fontSize: '14px',
-            color: '#aaaaaa'
-        }).setOrigin(1, 1).setInteractive({ useHandCursor: true });
 
-        editBtn.on('pointerdown', () => {
-            const newName = prompt("Nuevo nombre:", this.playerName);
-            if (newName) {
-                localStorage.setItem('26_player_name', newName);
-                this.scene.start('PlayScene', { playerName: newName });
-            }
-        });
 
-        // Botón de Reglas - NUEVO
-        const rulesBtn = this.add.text(width - 180, height - 30, '❔ Cómo Jugar', {
-            fontSize: '14px',
-            color: '#00d4ff'
-        }).setOrigin(1, 1).setInteractive({ useHandCursor: true });
+        // Botón de Reglas
+        const rulesBtn = this.add.text(width - 50, height - 30, '❔ Cómo Jugar', {
+            fontSize: '16px',
+            color: '#00d4ff',
+            backgroundColor: '#00000088',
+            padding: { x: 10, y: 5 }
+        }).setOrigin(1, 1)
+            .setDepth(2000)
+            .setInteractive({ useHandCursor: true })
+            .setData('isUI', true); // TAG IMPORTANT
 
         rulesBtn.on('pointerdown', () => this.showRules());
+
+        // Botón de Salir (Cerrar Sesión)
+        const exitBtn = this.add.text(width - 180, height - 30, '🚪 Salir', {
+            fontSize: '16px',
+            color: '#ff5555',
+            backgroundColor: '#00000088',
+            padding: { x: 10, y: 5 }
+        }).setOrigin(1, 1)
+            .setDepth(2000)
+            .setInteractive({ useHandCursor: true })
+            .setData('isUI', true); // TAG IMPORTANT
+
+        exitBtn.on('pointerdown', () => {
+            localStorage.removeItem('26_player_name');
+            if (this.socket) this.socket.disconnect();
+            window.location.reload(); // Recargar para volver limpia a la BootScene
+        });
 
         // Inicializar sonidos
         this.sfx = {
@@ -122,6 +135,7 @@ export class PlayScene extends Phaser.Scene {
             };
             this.currentTurn = (data.role === 'p1') ? 'human' : 'opponent';
             this.renderBoard();
+            this.updateTurnVisuals(); // ACTUALIZAR VISUALES AL INICIO
             this.showMessage(`¡Contra ${data.opponentName}!`, "#00ff00");
             this.sfx.shuffle.play();
         });
@@ -200,14 +214,18 @@ export class PlayScene extends Phaser.Scene {
     }
 
     renderBoard() {
-        // Limpiamos todo menos las zonas base
+        // Limpiamos todo MENOS las zonas base, MENSAJES ACTIVOS, y ELEMENTOS UI
         this.children.getAll().filter(child => child.type === 'Sprite' || child.type === 'Text').forEach(child => {
+            if (child.getData('isMessage')) return; // No borrar mensajes
+            if (child.getData('isUI')) return;      // No borrar botones UI
+
             if (!child.text || !child.text.includes('Escala')) child.destroy();
         });
 
         this.renderHumanState();
         this.renderOpponentState(); // REGLA 2: Llamada a la función de oponente
         this.renderCentralScales();
+        this.updateTurnVisuals(); // MANTENER VISUALES DE TURNO
     }
 
     // REGLA 2: Función específica para el estado del oponente
@@ -217,7 +235,7 @@ export class PlayScene extends Phaser.Scene {
         const centerX = width / 2;
 
         // Nombre Oponente
-        this.add.text(centerX, 20, this.opponentName || "Esperando...", {
+        this.opponentNameText = this.add.text(centerX, 20, this.opponentName || "Esperando...", {
             fontSize: '18px', color: '#ff0055', fontStyle: 'bold'
         }).setOrigin(0.5, 0);
 
@@ -281,7 +299,7 @@ export class PlayScene extends Phaser.Scene {
         const hum = this.players.human;
 
         // Nombre Humano (Esquina inferior izquierda)
-        this.add.text(50, height - 170, this.playerName, {
+        this.playerNameText = this.add.text(50, height - 170, this.playerName, {
             fontSize: '18px', color: '#00d4ff', fontStyle: 'bold'
         }).setOrigin(0, 1);
 
@@ -389,6 +407,9 @@ export class PlayScene extends Phaser.Scene {
 
         this.input.on('dragend', (pointer, gameObject, dropped) => {
             gameObject.setAlpha(1);
+            gameObject.setDepth(100); // Reset depth immediately
+
+            // Si no se soltó en una zona válida (dropped=false), volver a la mano
             if (!dropped) {
                 this.returnCard(gameObject);
             }
@@ -462,8 +483,11 @@ export class PlayScene extends Phaser.Scene {
             duration: 300,
             onComplete: () => {
                 this.sfx.snap.play({ rate: 0.8 });
-                // En multijugador, el servidor gestiona el cambio de turno
-                // Por ahora solo actualizamos localmente lo básico
+                // El servidor enviará 'turn_change' o similar si implementáramos lógica completa server-side
+                // Por ahora, simulamos el fin de turno localmente para single-player visual feel
+                // OJO: En multiplayer real, deberíamos esperar confirmación. 
+                // Asumimos que el drop es válido y finaliza el turno.
+                this.endTurn();
             }
         });
     }
@@ -487,19 +511,70 @@ export class PlayScene extends Phaser.Scene {
     opponentMoveDelay = 800; // Milliseconds
 
     endTurn() {
+        // Limpiar Tweens anteriores
+        this.turnTweens.forEach(t => t.stop());
+        this.turnTweens = [];
+
         if (this.currentTurn === 'human') {
             this.currentTurn = 'opponent';
             this.dealer.refillHand(this.players.human.hand, this.players.human.wildcards);
             this.renderBoard();
+            this.updateTurnVisuals(); // ACTUALIZAR
             this.showMessage("Turno del Oponente", "#ffaa00");
-            this.time.delayedCall(this.opponentMoveDelay, () => this.executeOpponentTurn());
+
+            // Simulación IA solo si no estamos en red real
+            // this.time.delayedCall(this.opponentMoveDelay, () => this.executeOpponentTurn());
         } else {
             this.currentTurn = 'human';
             this.dealer.refillHand(this.players.opponent.hand, this.players.opponent.wildcards);
             this.renderBoard();
+            this.updateTurnVisuals(); // ACTUALIZAR
             this.showMessage("Tu Turno", "#00ff00");
-            // SFX Robo de Carta / Inicio Turno
             this.sfx.shuffle.play({ volume: 0.5 });
+        }
+    }
+
+    updateTurnVisuals() {
+        // Stop existing tweens
+        this.turnTweens.forEach(t => t.stop());
+        this.turnTweens = [];
+
+        // Reset visual state
+        if (this.playerNameText) {
+            this.playerNameText.setAlpha(0.5).setScale(1).setShadow(0, 0, '#000', 0);
+            this.playerNameText.setColor('#aaaaaa'); // Dimmed color
+        }
+        if (this.opponentNameText) {
+            this.opponentNameText.setAlpha(0.5).setScale(1).setShadow(0, 0, '#000', 0);
+            this.opponentNameText.setColor('#aaaaaa'); // Dimmed color
+        }
+
+        let activeText = null;
+        let color = '#ffffff';
+
+        if (this.currentTurn === 'human') {
+            activeText = this.playerNameText;
+            color = '#00ffff'; // Electric Cyan
+        } else {
+            activeText = this.opponentNameText;
+            color = '#ff0055'; // Hot Pink
+        }
+
+        if (activeText) {
+            activeText.setAlpha(1).setScale(1.2).setColor(color);
+            activeText.setShadow(0, 0, color, 15, true, true);
+
+            // Fuerte parpadeo
+            const tween = this.tweens.add({
+                targets: activeText,
+                alpha: 0.3,
+                scale: 1.15, // Slight pulsing size
+                yoyo: true,
+                repeat: -1,
+                duration: 600,
+                ease: 'Sine.easeInOut'
+            });
+            this.turnTweens.push(tween);
         }
     }
 
@@ -609,9 +684,13 @@ export class PlayScene extends Phaser.Scene {
             x: gameObject.getData('originalX'),
             y: gameObject.getData('originalY'),
             rotation: originalRotation,
-            scale: 1,
+            scale: 1, // FORCE SCALE RESET
             duration: 200,
-            ease: 'Power2'
+            ease: 'Power2',
+            onComplete: () => {
+                // Ensure depth is reset after tween
+                this.children.sortGameObjects((a, b) => (a.y - b.y));
+            }
         });
         if (shadow) {
             this.tweens.add({
@@ -651,14 +730,18 @@ export class PlayScene extends Phaser.Scene {
             wordWrap: { width: 600 }
         }).setOrigin(0.5).setDepth(3000).setAlpha(0);
 
-        this.tweens.add({
+        msgBox.setData('isMessage', true); // TAG PARA EVITAR DESTRUCCIÓN ACCIDENTAL
+
+        // Cadena explícita de interpolaciones para mayor estabilidad
+        this.tweens.chain({
             targets: msgBox,
-            alpha: 1,
-            duration: 300,
-            yoyo: true,
-            hold: this.displayDuration,
+            tweens: [
+                { alpha: 1, duration: 300, ease: 'Power2' },
+                { delay: this.displayDuration, duration: 0 }, // Hold visual
+                { alpha: 0, duration: 300, ease: 'Power2' }
+            ],
             onComplete: () => {
-                msgBox.destroy();
+                if (msgBox.active) msgBox.destroy();
                 this.displayNextMessage();
             }
         });
@@ -671,19 +754,42 @@ export class PlayScene extends Phaser.Scene {
     showRules() {
         const { width, height } = this.scale.displaySize;
         const modal = this.add.container(0, 0).setDepth(5000);
-        const bg = this.add.rectangle(0, 0, width, height, 0x000000, 0.8).setOrigin(0).setInteractive();
-        const info = this.add.image(width / 2, height / 2, 'rulesInfo').setInteractive();
+        const bg = this.add.rectangle(0, 0, width, height, 0x000000, 0.95).setOrigin(0).setInteractive();
 
-        // Auto-escalado de la infografía
-        const scale = Math.min((width * 0.85) / info.width, (height * 0.85) / info.height);
+        // Contenido de Texto (Reglas Resumidas)
+        const rulesText = `REGLAS BÁSICAS (26)
+
+1. OBJETIVO: Vaciar tu Pila de Reserva (20 cartas).
+
+2. ESCALAS CENTRALES:
+   - Inician con AS (1) -> Terminan en REINA (12).
+   - Secuencia ascendente (1, 2, 3...) sin importar palo.
+   - Comodines reemplazan números, PERO:
+     * No sirven para AS (1) ni REINA (12).
+     * No se pueden poner 2 comodines seguidos.
+
+3. TURNO:
+   - Juega cartas de tu Mano, Reserva o Comodines.
+   - Para TERMINAR turno, descarta una carta.`;
+
+        const textObj = this.add.text(50, 50, rulesText, {
+            fontSize: '18px',
+            color: '#ffffff',
+            wordWrap: { width: width * 0.4 },
+            lineSpacing: 10
+        }).setOrigin(0, 0);
+
+        // Infografía (Lado derecho)
+        const info = this.add.image(width * 0.7, height / 2, 'rulesInfo').setInteractive();
+        const scale = Math.min((width * 0.45) / info.width, (height * 0.8) / info.height);
         info.setScale(scale);
 
-        // Botón de cerrar (Círculo rojo con X)
-        const closeBtn = this.add.text(width / 2 + (info.displayWidth / 2), height / 2 - (info.displayHeight / 2), '✕', {
-            fontSize: '28px', color: '#fff', backgroundColor: '#f00', padding: { x: 10, y: 5 }
-        }).setOrigin(0.5).setInteractive({ useHandCursor: true });
+        // Botón de cerrar
+        const closeBtn = this.add.text(width - 50, 50, '✕', {
+            fontSize: '32px', color: '#fff', backgroundColor: '#f00', padding: { x: 15, y: 5 }
+        }).setOrigin(1, 0).setInteractive({ useHandCursor: true });
 
-        modal.add([bg, info, closeBtn]);
+        modal.add([bg, textObj, info, closeBtn]);
         const hide = () => modal.destroy();
         bg.on('pointerdown', hide);
         closeBtn.on('pointerdown', hide);
